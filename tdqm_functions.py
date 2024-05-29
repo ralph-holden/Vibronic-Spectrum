@@ -10,9 +10,12 @@ from numpy.fft import fft,ifft,fftshift,ifftshift,fftfreq
 
 import math as math
 from scipy.constants import hbar, c, electron_mass, proton_mass
+from scipy.signal import find_peaks
 
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+
+from scipy.optimize import curve_fit
 
 import pickle
 
@@ -46,8 +49,8 @@ x0_g = 5.038
 x0_e = 5.715
 
 Te_g = 0.1
-Te_e = 0.718
-Te = Te_e - Te_g
+Te_e = 0.1718
+delta_Te = Te_e - Te_g
 
 # functions: finding eigenvalues & gwp
 def eigen_ho(x, v, m, k):
@@ -86,14 +89,14 @@ def V_rydberg(x):
     De = De_e
     delt = delt_e
     x0 = x0_e
-    return De * (1 - (1 + delt * (x - x0)) * np.e**( -1*delt * (x - x0) )) + Te
+    return De * (1 - (1 + delt * (x - x0)) * np.e**( -1*delt * (x - x0) )) + Te_e
 
 def V_rydberg_g(x):
     '''For trialling rydberg of ground state'''
     De = De_g
     delt = delt_g
     x0 = x0_g
-    return De * (1 - (1 + delt * (x - x0)) * np.e**( -1*delt * (x - x0) )) 
+    return De * (1 - (1 + delt * (x - x0)) * np.e**( -1*delt * (x - x0) )) + Te_g
 
 def tdp(x):
     '''Transition Dipole Moment'''
@@ -132,7 +135,7 @@ class Wavepkt:
     x0_e = 5.715
     
     Te_g = 0.1
-    Te_e = 0.718
+    Te_e = 0.1718
     Te = Te_e - Te_g
     
     k_g = De_g * delt_g**2
@@ -151,8 +154,9 @@ class Wavepkt:
         self.frequency =       2*np.pi*fftshift(fftfreq(self.nsteps+1))
         self.autocorrelation = []
         self.gauss_w =         None
-        self.absortion =       None
+        self.absorption =       None
         self.fpeaks =          []
+        self.frequency_absorption = None
         
         if estate == 'ground':
             self.De = self.De_g
@@ -223,13 +227,25 @@ class Wavepkt:
             yprov = np.trapz(i,self.x_grid)
             self.autocorrelation.append(yprov)
             
+    def calc_byparts_autocorrelation(self, div = 8):
+        '''Calculating the autocorrellation function by parts, to reduced the size of any one array'''
+        whole = len(self.wf_dynamics) - 1
+        for num in range(div):
+            if num == 0:
+                part = self.wf_dynamics[ 0 : int( whole/div * (num + 1) ) + 1 ]
+            else:
+                part  = self.wf_dynamics[ int( whole/div * num ) + 1 : int( whole/div * (num + 1) ) + 1 ]
+            for i in np.conj(self.wf_dynamics[0]) * part: 
+                yprov = np.trapz(i,self.x_grid)
+                self.autocorrelation.append(yprov)
+            
     def plot_autocorrelation(self):
         plt.figure(figsize = [8,5])
         plt.title('Autocorrelation')
         plt.xlabel('Time')
         plt.ylabel('Weighting')
         plt.grid(linestyle=':')
-        plt.xlim(0)
+        #plt.xlim(0)
         plt.plot(np.linspace(0,self.dt*self.nsteps,len(self.autocorrelation)) , self.autocorrelation)
         plt.show()
     
@@ -246,18 +262,27 @@ class Wavepkt:
         plt.plot(self.frequency,abs(self.gauss_w))
         plt.show()
         
-    def calc_absorbtion(self, E_zeropoint, E_electronic = 0.168):
-        E_shift = E_electronic - E_zeropoint # shift power series values by electronic energy and ground zero point energy
-        coeff = ( 2 * np.pi * self.frequency  ) / ( 3 * hbar_reduced * c_reduced )
-        self.absorbtion = (self.gauss_w + E_shift) * coeff
+    def calc_absorption(self, E_zeropoint = 0.10053029471290863):
+        self.frequency_absorption = self.frequency - E_zeropoint
+        self.absorption = (self.gauss_w) * self.frequency_absorption
         
-    def plot_absorbtion(self):
+    def plot_absorption(self):
         plt.figure(figsize = [8,5])
-        plt.title('Absorbtion Spectrum')
+        plt.title('Absorption Spectrum')
         plt.xlabel('Frequency')
         plt.ylabel('Intensity')
         plt.grid(linestyle=':')
-        plt.plot(self.frequency,abs(self.absorbtion))
+        plt.plot(self.frequency,abs(self.absorption))
+        plt.show()
+        
+    def plot_absorption_real(self, cut = 103200):
+        wavelength = 1/(self.frequency_absorption * 219474.6) * 10**7
+        plt.figure(figsize = [8,5])
+        plt.title('Absorption Spectrum')
+        plt.xlabel('Wavelength (nm)')
+        plt.ylabel('Intensity')
+        plt.grid(linestyle=':')
+        plt.plot(wavelength[cut:], abs(self.absorption[cut:]))
         plt.show()
         
     def plot_all(self):
@@ -278,11 +303,11 @@ class Wavepkt:
         plt.plot(self.frequency,abs(self.gauss_w)) 
         
         plt.subplot(3, 1, 3)
-        plt.title('Absorbtion Spectrum')
+        plt.title('Absorption Spectrum')
         plt.xlabel('Frequency')
         plt.ylabel('Intensity')
         plt.grid(linestyle=':')
-        plt.plot(self.frequency,abs(self.absorbtion)) 
+        plt.plot(self.frequency,abs(self.absorption)) 
         
         plt.tight_layout(pad = 2)
         plt.show()
@@ -342,14 +367,13 @@ class Wavepkt:
     # loading and saving data
     def save(self, filename):
         with open(filename+'.dat','wb') as data_f:
-            pickle.dump([self.wf_dynamics, self.frequency, self.gauss_w], data_f)
+            pickle.dump([self.frequency, self.gauss_w], data_f)
             
     def load(self, filename):
         with open(filename+'.dat','rb') as data_f:
             loaded_data = pickle.load(data_f)
-            self.wf_dynamics = loaded_data[0]
-            self.frequency = loaded_data[1]
-            self.gauss_w = loaded_data[2]
+            self.frequency = loaded_data[0]
+            self.gauss_w = loaded_data[1]
     
 
 
